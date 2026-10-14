@@ -1,0 +1,1 @@
+Small snapshot fuzzer using libnyx as its backend
