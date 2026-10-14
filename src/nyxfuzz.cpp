@@ -19,30 +19,8 @@ extern "C" {
 #include "utils.hpp"
 
 
-namespace {
-
 constexpr std::size_t kAgentPayloadBytes = 64 * 1024;  // PAYLOAD_SIZE * 1024 in the driver
 
-volatile std::sig_atomic_t g_stop = 0;
-extern "C" void on_signal(int) { g_stop = 1; }
-
-std::string_view ret_name(NyxReturnValue r) {
-    switch (r) {
-    case Normal:                return "Normal";
-    case Crash:                 return "Crash";
-    case Asan:                  return "Asan";
-    case Timeout:               return "Timeout";
-    case InvalidWriteToPayload: return "InvalidWriteToPayload";
-    case Error:                 return "Error";
-    case IoError:               return "IoError";
-    case Abort:                 return "Abort";
-    default:                    return "Unknown";
-    }
-}
-
-using NyxProcessPtr = std::unique_ptr<NyxProcess, decltype(&nyx_shutdown)>;
-
-}  // namespace
 
 int main(int argc, char **argv) {
     // Only add -h/--help automatically; argparse's default -v/--version would clash with -v (verbose).
@@ -104,34 +82,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    Master_t masterFuzzer(config);
-
-
-    /*
-
+    // Ability to stop on a Ctrl-C
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
-    // Dummy input: fixed bytes, the agent can ignore or parse them
-    std::array<uint8_t, 4> input{0xde, 0xaa, 0xbe, 0xef};
-    std::array<char, 1024> aux{};
+    Master_t masterFuzzer(config);
+    masterFuzzer.run();
 
-    for (unsigned long i = 0; !g_stop && (runs == 0 || i < runs); ++i) {
-        nyx_set_afl_input(proc.get(), input.data(), static_cast<uint32_t>(input.size()));
-        const NyxReturnValue r = nyx_exec(proc.get());
-
-        uint32_t n = nyx_get_aux_string(proc.get(), reinterpret_cast<uint8_t *>(aux.data()),
-                                        static_cast<uint32_t>(aux.size() - 1));
-        n = std::min<uint32_t>(n, aux.size() - 1);
-        const std::string_view aux_str(aux.data(), n);
-
-        std::cout << '[' << i << "] " << ret_name(r);
-        if (!aux_str.empty()) std::cout << " | " << aux_str;
-        std::cout << std::endl;
-
-        if (r == Error || r == IoError || r == Abort) break;
-    }
-
-    // proc is shut down automatically by the unique_ptr deleter (nyx_shutdown) */
     return 0;
 }

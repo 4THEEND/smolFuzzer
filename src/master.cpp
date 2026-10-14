@@ -1,6 +1,7 @@
 #include "master.hpp"
 
 #include <iostream>
+#include <thread>
 
 
 Master_t::Master_t(const FuzzerConfig_t& conf)
@@ -13,14 +14,34 @@ Master_t::Master_t(const FuzzerConfig_t& conf)
 
     DebugPrint<0>("master", "Starting QEMU-Nyx (waiting for the root snapshot)...\n");
 
-    for(unsigned long i = 0; i < Config_.nAgents; i++){
-        Agents_.emplace_back(Corpus_, Config_, i);
+    for (unsigned long i = 0; i < Config_.nAgents; i++) {
+        auto agent = std::make_unique<Agent_t>(Corpus_, Config_, i);
 
-        if(Agents_.back().getStatus() != AgentStatus::Ready){
+        if (agent->getStatus() != AgentStatus::Ready) {
             DebugPrint<0>("master", "Failed to start agent {}\n", i);
-            Agents_.pop_back();
-        } else {
-            DebugPrint<1>("master", "Agent {} ready to run\n", i);
+            continue;   // unique_ptr cleans it up
         }
+
+        DebugPrint<1>("master", "Agent {} ready to run\n", i);
+        Agents_.push_back(std::move(agent));
     }
+}
+
+
+void Master_t::run() {
+    if(Agents_.empty()){
+        DebugPrint<0>("master", "No agent to run. Returning...\n");
+        return;
+    }
+
+    std::vector<std::thread> agentThreads{};
+    agentThreads.reserve(Agents_.size());
+
+    for (auto& agent : Agents_) {
+        if (agent->getStatus() == AgentStatus::Ready)
+            agentThreads.push_back(agent->spawn());
+    }
+
+    for(auto& thread : agentThreads)
+        thread.join();
 }
