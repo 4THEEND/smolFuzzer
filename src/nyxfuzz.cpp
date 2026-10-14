@@ -106,20 +106,8 @@ int main(int argc, char **argv) {
 
     Master_t masterFuzzer(config);
 
-    /*
-    
-    NyxProcessPtr proc(nyx_new(cfg, 0), &nyx_shutdown);
-    if (!proc) {
-        std::cerr << "[-] nyx_new failed\n";
-        return 1;
-    }
 
-    const auto sec  = std::min(timeout_ms / 1000, 255UL);
-    const auto usec = (timeout_ms % 1000) * 1000;
-    nyx_option_set_reload_mode(proc.get(), true);
-    nyx_option_set_timeout(proc.get(), static_cast<uint8_t>(sec), static_cast<uint32_t>(usec));
-    nyx_option_apply(proc.get());
-    std::cerr << "[+] Nyx ready\n";
+    /*
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);

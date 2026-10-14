@@ -5,18 +5,7 @@
 
 #include "agent.hpp"
 #include "corpus.hpp"
-
-
-struct FuzzerConfig_t {
-    std::string sharedir;
-    std::string workdir;
-    unsigned long nAgents;
-    unsigned long runs;
-    unsigned long timeout_ms;
-    bool verbose;
-    std::size_t kAgentPayloadBytes;
-    void* nyxConf;
-};
+#include "utils.hpp"
 
 
 class Master_t {
