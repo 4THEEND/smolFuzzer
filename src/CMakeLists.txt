@@ -64,7 +64,14 @@ find_package(Threads REQUIRED)
 target_link_libraries(libnyx INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
 
 
-add_executable(nyxfuzz nyxfuzz.cpp master.cpp agent.cpp corpus.cpp)
+add_executable(nyxfuzz 
+    nyxfuzz.cpp
+    master.cpp
+    agent.cpp
+    corpus.cpp
+    mutator.cpp
+    oracle.cpp
+)
 target_link_libraries(nyxfuzz PRIVATE fmt::fmt argparse::argparse libnyx)
 target_compile_options(nyxfuzz PRIVATE -Wall -Wextra)
 
