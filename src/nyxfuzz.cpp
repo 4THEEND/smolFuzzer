@@ -10,11 +10,10 @@
 #include "mutator.hpp"
 #include "utils.hpp"
 
+constexpr std::size_t kAgentPayloadBytes = 64 * 1024; // PAYLOAD_SIZE * 1024 in the driver
 
-constexpr std::size_t kAgentPayloadBytes = 64 * 1024;  // PAYLOAD_SIZE * 1024 in the driver
-
-
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     argparse::ArgumentParser program("nyxfuzz", "1.0", argparse::default_arguments::help);
 
     program.add_argument("-s", "--sharedir")
@@ -60,38 +59,44 @@ int main(int argc, char **argv) {
         .implicit_value(true)
         .help("forward guest hprintf output to stderr");
 
-    try {
+    try
+    {
         program.parse_args(argc, argv);
-    } catch (const std::exception &err) {
-        std::cerr << err.what() << '\n' << program;
+    }
+    catch (const std::exception &err)
+    {
+        std::cerr << err.what() << '\n'
+                  << program;
         return 1;
     }
 
     const auto mutator = program.get<std::string>("--mutator");
-    if (!MutatorRegistry_t::instance().contains(mutator)) {
+    if (!MutatorRegistry_t::instance().contains(mutator))
+    {
         std::cerr << "Unknown mutator '" << mutator << "'. Available:\n"
                   << MutatorRegistry_t::instance().describe();
         return 1;
     }
 
     const auto sharedir = program.get<std::string>("--sharedir");
-    void* nyxConf = nyx_config_load(sharedir.c_str());
-    if (!nyxConf) {
+    void *nyxConf = nyx_config_load(sharedir.c_str());
+    if (!nyxConf)
+    {
         DebugPrint<0>("-", "nyx_config_load failed\n");
         return 1;
     }
 
     FuzzerConfig_t config{
-        .sharedir           = sharedir,
-        .workdir            = program.get<std::string>("--workdir"),
-        .seedsDir           = program.get<std::string>("--seeds"),
-        .mutator            = mutator,
-        .nAgents            = program.get<unsigned long>("--agents"),
-        .runs               = program.get<unsigned long>("--runs"),
-        .timeout_ms         = program.get<unsigned long>("--timeout"),
-        .verbose            = program.get<bool>("--verbose"),
+        .sharedir = sharedir,
+        .workdir = program.get<std::string>("--workdir"),
+        .seedsDir = program.get<std::string>("--seeds"),
+        .mutator = mutator,
+        .nAgents = program.get<unsigned long>("--agents"),
+        .runs = program.get<unsigned long>("--runs"),
+        .timeout_ms = program.get<unsigned long>("--timeout"),
+        .verbose = program.get<bool>("--verbose"),
         .kAgentPayloadBytes = kAgentPayloadBytes,
-        .nyxConf            = nyxConf,
+        .nyxConf = nyxConf,
     };
 
     // Ability to stop on a Ctrl-C

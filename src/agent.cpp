@@ -1,6 +1,5 @@
 #include "agent.hpp"
 
-#include <fmt/format.h>
 #include <algorithm>
 #include <array>
 #include <string_view>
@@ -56,7 +55,6 @@ void Agent_t::run() {
         .pickOther = [this] { return Corpus_->pick(Rng_); },
     };
 
-    // Per-agent counter
     for (unsigned long i = 0; !g_stop.load(std::memory_order_relaxed) && (Config_.runs == 0 || i < Config_.runs); ++i) {
         if (const InputPtr parent = Corpus_->pick(Rng_))
             testcase.assign(parent->begin(), parent->end());
@@ -67,7 +65,7 @@ void Agent_t::run() {
         if (testcase.size() > MaxInputSize_) testcase.resize(MaxInputSize_);
         if (testcase.empty()) testcase.push_back(0);
 
-        // 2. Execute.
+
         nyx_set_afl_input(Proc_.get(), testcase.data(), static_cast<uint32_t>(testcase.size()));
         const NyxReturnValue r = nyx_exec(Proc_.get());
 
@@ -85,7 +83,7 @@ void Agent_t::run() {
             break;
         }
 
-        // 3. Post-execution callback.
+     
         onExecutionDone(ExecResult_t{
             .agentId = AgentId_,
             .ret     = r,
@@ -100,8 +98,6 @@ void Agent_t::run() {
 
 
 void Agent_t::onExecutionDone(const ExecResult_t& res) {
-    // Inputs pushed by the guest during this run. They are added directly:
-    // the bitmap we hold describes `res.input`, not the dumped file.
     collectDumpedInput();
 
     Corpus_->onExecution(res);
