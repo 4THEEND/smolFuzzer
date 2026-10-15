@@ -65,6 +65,13 @@ void Agent_t::run() {
         if (testcase.size() > MaxInputSize_) testcase.resize(MaxInputSize_);
         if (testcase.empty()) testcase.push_back(0);
 
+        // Insert after so there won't be any modification from the mutator
+        //struct Input {
+        //    size_t size,
+        //    uint8 workerId,
+        //    uint8 buffer[]
+        //}
+        testcase.insert(testcase.begin(), static_cast<uint8_t>(AgentId_));
 
         nyx_set_afl_input(Proc_.get(), testcase.data(), static_cast<uint32_t>(testcase.size()));
         const NyxReturnValue r = nyx_exec(Proc_.get());
