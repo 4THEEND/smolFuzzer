@@ -22,6 +22,17 @@
 namespace W32k
 {
 
+    // W32K_ALIGN8 from w32k_wire_host.h rounds up to the next multiple of 8.
+    // Redefine locally with a typed helper so it works on any integer type.
+    namespace detail
+    {
+        static constexpr uint32_t align8(uint32_t x) noexcept
+        {
+            return (x + 7u) & ~7u;
+        }
+    }
+    using detail::align8;
+
     /* -------------------------------------------------------------------- */
     /* Internal: safe buffer cursor                                          */
     /* -------------------------------------------------------------------- */
@@ -542,6 +553,169 @@ namespace W32k
 
         for (const auto &ev : batch.events)
             Print(ev, out);
+    }
+
+    /* -------------------------------------------------------------------- */
+    /* Encoder                                                               */
+    /* -------------------------------------------------------------------- */
+
+    std::vector<uint8_t> EncodeEvent(const EventInfo &ev)
+    {
+        const auto n_args = static_cast<uint32_t>(ev.args.size());
+        const auto n_nested = static_cast<uint32_t>(ev.nested.size());
+
+        // Fixed-part size: header + arg table + nested table.
+        // All three structs have sizes that are already multiples of 8, so no
+        // alignment gap is needed between them.
+        const uint32_t args_offset = sizeof(W32K_EVENT_HEADER);
+        const uint32_t nested_offset = args_offset + n_args * sizeof(W32K_EVENT_ARG);
+        const uint32_t blobs_start = nested_offset + n_nested * sizeof(W32K_EVENT_NESTED);
+        // blobs_start is already 8-aligned since all three sizes are multiples of 8.
+        static_assert(sizeof(W32K_EVENT_HEADER) % 8 == 0);
+        static_assert(sizeof(W32K_EVENT_ARG) % 8 == 0);
+        static_assert(sizeof(W32K_EVENT_NESTED) % 8 == 0);
+
+        // Pre-pass: assign a blob offset to every arg/nested entry that has data.
+        // Blobs are written arg-first then nested, each padded to 8 bytes.
+        struct BlobPlace
+        {
+            uint32_t offset = 0;
+            uint32_t len = 0;
+        };
+        std::vector<BlobPlace> ab(n_args), nb(n_nested);
+        uint32_t cursor = blobs_start;
+        for (uint32_t i = 0; i < n_args; ++i)
+        {
+            auto len = static_cast<uint32_t>(ev.args[i].data.size());
+            if (len)
+            {
+                ab[i] = {cursor, len};
+                cursor += align8(len);
+            }
+        }
+        for (uint32_t i = 0; i < n_nested; ++i)
+        {
+            auto len = static_cast<uint32_t>(ev.nested[i].data.size());
+            if (len)
+            {
+                nb[i] = {cursor, len};
+                cursor += align8(len);
+            }
+        }
+        const uint32_t total = cursor; // already 8-aligned
+
+        std::vector<uint8_t> buf(total, 0u);
+
+        // Header
+        {
+            W32K_EVENT_HEADER h{};
+            h.Magic = W32K_EVENT_MAGIC;
+            h.Version = W32K_EVENT_VERSION;
+            h.HeaderSize = static_cast<uint16_t>(sizeof(h));
+            h.TotalSize = total;
+            h.Flags = ev.flags;
+            h.Sequence = ev.sequence;
+            h.Timestamp = ev.timestamp;
+            h.ProcessId = ev.process_id;
+            h.ThreadId = ev.thread_id;
+            h.ReturnValue = ev.return_value;
+            h.Ssn = ev.ssn;
+            h.Phase = static_cast<uint8_t>(ev.phase);
+            h.ArgCount = static_cast<uint8_t>(n_args);
+            h.ArgsOffset = args_offset;
+            h.NestedOffset = nested_offset;
+            h.NestedCount = static_cast<uint16_t>(n_nested);
+            std::memcpy(buf.data(), &h, sizeof(h));
+        }
+
+        // Arg table
+        for (uint32_t i = 0; i < n_args; ++i)
+        {
+            const auto &a = ev.args[i];
+            W32K_EVENT_ARG wa{};
+            wa.Value = a.value;
+            wa.Kind = static_cast<uint8_t>(a.kind);
+            wa.Size = a.size;
+            wa.Direction = static_cast<uint8_t>(a.direction);
+            wa.CaptureType = static_cast<uint8_t>(a.capture_type);
+            wa.Status = a.status;
+            wa.CaptureFlags = a.capture_flags.bits;
+            wa.RequestedLength = a.requested_length;
+            wa.DataOffset = ab[i].offset;
+            wa.DataLength = ab[i].len;
+            std::memcpy(buf.data() + args_offset + i * sizeof(wa), &wa, sizeof(wa));
+        }
+
+        // Nested table
+        for (uint32_t i = 0; i < n_nested; ++i)
+        {
+            const auto &n = ev.nested[i];
+            W32K_EVENT_NESTED wn{};
+            wn.ArgIndex = n.arg_index;
+            wn.Direction = static_cast<uint8_t>(n.direction);
+            wn.ParentOffset = n.parent_offset;
+            wn.PointerValue = n.pointer_value;
+            wn.Status = n.status;
+            wn.CaptureFlags = n.capture_flags.bits;
+            wn.RequestedLength = n.requested_length;
+            wn.DataOffset = nb[i].offset;
+            wn.DataLength = nb[i].len;
+            std::memcpy(buf.data() + nested_offset + i * sizeof(wn), &wn, sizeof(wn));
+        }
+
+        // Blobs
+        for (uint32_t i = 0; i < n_args; ++i)
+            if (ab[i].len)
+                std::memcpy(buf.data() + ab[i].offset, ev.args[i].data.data(), ab[i].len);
+        for (uint32_t i = 0; i < n_nested; ++i)
+            if (nb[i].len)
+                std::memcpy(buf.data() + nb[i].offset, ev.nested[i].data.data(), nb[i].len);
+
+        return buf;
+    }
+
+    static std::vector<uint8_t>
+    encode_batch_impl(const std::vector<EventInfo> &events, uint32_t dropped)
+    {
+        // Encode each event independently, then concatenate.
+        std::vector<std::vector<uint8_t>> event_bufs;
+        event_bufs.reserve(events.size());
+        uint32_t events_bytes = 0;
+        for (const auto &ev : events)
+        {
+            event_bufs.push_back(EncodeEvent(ev));
+            events_bytes += static_cast<uint32_t>(event_bufs.back().size());
+        }
+
+        const uint32_t total = static_cast<uint32_t>(sizeof(W32K_BATCH_HEADER)) + events_bytes;
+        std::vector<uint8_t> buf(total, 0u);
+
+        W32K_BATCH_HEADER bh{};
+        bh.Magic = W32K_BATCH_MAGIC;
+        bh.Version = W32K_BATCH_VERSION;
+        bh.TotalSize = total;
+        bh.EventCount = static_cast<uint32_t>(events.size());
+        bh.Dropped = dropped;
+        std::memcpy(buf.data(), &bh, sizeof(bh));
+
+        uint32_t off = sizeof(bh);
+        for (const auto &eb : event_bufs)
+        {
+            std::memcpy(buf.data() + off, eb.data(), eb.size());
+            off += static_cast<uint32_t>(eb.size());
+        }
+        return buf;
+    }
+
+    std::vector<uint8_t> EncodeBatch(const BatchResult &batch)
+    {
+        return encode_batch_impl(batch.events, batch.dropped);
+    }
+
+    std::vector<uint8_t> EncodeBatch(const std::vector<EventInfo> &events,
+                                     uint32_t dropped)
+    {
+        return encode_batch_impl(events, dropped);
     }
 
 } // namespace W32k
