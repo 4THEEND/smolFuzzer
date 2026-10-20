@@ -47,11 +47,30 @@ typedef struct W32K_BATCH_HEADER {
 C_ASSERT(sizeof(W32K_BATCH_HEADER) == 24);
 
 /* -------------------------------------------------------------------- */
+/* Thread fingerprint (identical layout to FP_HASHES / W32K_FINGERPRINT) */
+/* -------------------------------------------------------------------- */
+
+#pragma pack(push, 8)
+typedef struct W32K_FINGERPRINT {
+    uint64_t Exact;
+    uint64_t ModulePath;
+    uint64_t Creator;
+    uint32_t AnonFrames;
+    uint8_t  Remote;
+    uint8_t  StartAnon;
+    uint8_t  Pad0[2];
+    uint32_t Index;
+    uint32_t Pad1;
+} W32K_FINGERPRINT;
+#pragma pack(pop)
+C_ASSERT(sizeof(W32K_FINGERPRINT) == 40);
+
+/* -------------------------------------------------------------------- */
 /* Event                                                                 */
 /* -------------------------------------------------------------------- */
 
 #define W32K_EVENT_MAGIC   0x4B323357u
-#define W32K_EVENT_VERSION 2u
+#define W32K_EVENT_VERSION 3u
 
 #define W32K_PHASE_PRE     0u
 #define W32K_PHASE_POST    1u
@@ -98,6 +117,7 @@ typedef struct W32K_EVENT_HEADER {
     uint32_t NestedOffset;
     uint16_t NestedCount;
     uint16_t Reserved;
+    W32K_FINGERPRINT Fingerprint;
 } W32K_EVENT_HEADER;
 
 typedef struct W32K_EVENT_ARG {
@@ -136,7 +156,7 @@ typedef struct W32K_WIRE_UNICODE_STRING {
 #pragma pack(pop)
 
 C_ASSERT(sizeof(W32K_BATCH_HEADER)          == 24);
-C_ASSERT(sizeof(W32K_EVENT_HEADER)          == 72);
+C_ASSERT(sizeof(W32K_EVENT_HEADER)          == 112);
 C_ASSERT(sizeof(W32K_EVENT_ARG)             == 32);
 C_ASSERT(sizeof(W32K_EVENT_NESTED)          == 40);
 C_ASSERT(sizeof(W32K_WIRE_UNICODE_STRING)   == 16);

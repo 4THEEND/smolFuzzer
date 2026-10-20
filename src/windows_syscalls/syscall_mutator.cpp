@@ -25,6 +25,11 @@ namespace Syscall
 
             W32k::Print(result, std::cout);
         }
+
+
+        void mutateOne(W32k::EventInfo &syscall, MutatorContext_t &ctx) {
+
+        }
     };
 
 } // namespace syscalls
