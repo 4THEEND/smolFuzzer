@@ -80,7 +80,8 @@ void Corpus_t::onExecution(const ExecResult_t &res)
     case Verdict::Boring:
         return;
     case Verdict::Interesting:
-        add(Input_t(res.input.begin(), res.input.end()), fmt::format("agent{}", res.agentId));
+        // + 1 to remove the agent id in the begining
+        add(Input_t(res.input.begin() + 1, res.input.end()), fmt::format("agent{}", res.agentId));
         return;
     case Verdict::Objective:
         saveObjective(res);

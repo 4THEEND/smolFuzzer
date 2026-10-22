@@ -86,6 +86,7 @@ Verdict CoverageOracle_t::evaluate(const ExecResult_t &res)
         return CrashCoverage_.update(res.bitmap) ? Verdict::Objective : Verdict::Boring;
 
     default:
-        return Verdict::Boring;
+        // Should be put to boring after 
+        return Verdict::Interesting;
     }
 }

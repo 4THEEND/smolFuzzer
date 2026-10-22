@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cstring>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 namespace W32k {
@@ -301,6 +302,7 @@ BatchResult DecodeBatch(const std::vector<uint8_t>& buf) {
     std::memcpy(&bh, buf.data(), sizeof(bh));
 
     if (bh.Magic != W32K_BATCH_MAGIC || bh.Version != W32K_BATCH_VERSION) {
+        std::cout << std::hex << bh.Magic << std::dec << " " << bh.Version << "\n";
         result.error_msg = "invalid batch magic/version";
         return result;
     }
