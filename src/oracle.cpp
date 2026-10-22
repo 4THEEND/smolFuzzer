@@ -6,6 +6,7 @@
 namespace
 {
 
+    // Hit count -> bucket bit (AFL classification).
     constexpr std::array<uint8_t, 256> kBuckets = []
     {
         std::array<uint8_t, 256> t{};
@@ -26,10 +27,10 @@ namespace
 
 } // namespace
 
-bool VirginMap_t::update(std::span<const uint8_t> bitmap)
+VirginMap_t::Result VirginMap_t::update(std::span<const uint8_t> bitmap)
 {
     if (bitmap.empty())
-        return false;
+        return Result::NoCoverage;
 
     // The bitmap size is only known once a NyxProcess exists, hence the lazy init.
     std::call_once(Init_, [&]
@@ -41,12 +42,14 @@ bool VirginMap_t::update(std::span<const uint8_t> bitmap)
     const std::size_t n = std::min(Size_, bitmap.size());
     const uint8_t *bm = bitmap.data();
     bool found = false;
+    bool anyHit = false;
 
     auto check = [&](std::size_t i)
     {
         const uint8_t b = kBuckets[bm[i]];
         if (b == 0)
             return;
+        anyHit = true;
         auto &v = Bits_[i];
         if ((v.load(std::memory_order_relaxed) & b) == b)
             return; // fast path: known
@@ -68,25 +71,27 @@ bool VirginMap_t::update(std::span<const uint8_t> bitmap)
     for (; i < n; ++i)
         check(i);
 
-    return found;
+    if (!anyHit)
+        return Result::NoCoverage;
+    return found ? Result::NewBits : Result::Known;
 }
 
 Verdict CoverageOracle_t::evaluate(const ExecResult_t &res)
 {
+    using R = VirginMap_t::Result;
+
     switch (res.ret)
     {
     case Normal:
-        return Coverage_.update(res.bitmap) ? Verdict::Interesting : Verdict::Boring;
+        return Coverage_.update(res.bitmap) == R::NewBits ? Verdict::Interesting : Verdict::Boring;
 
     case Crash:
     case Asan:
-        // Without coverage info we can't dedup here; the corpus still dedups by content.
-        if (res.bitmap.empty())
-            return Verdict::Objective;
-        return CrashCoverage_.update(res.bitmap) ? Verdict::Objective : Verdict::Boring;
+        // No coverage (no instrumentation, tracing off...): we can't dedup on
+        // the bitmap, so keep it; the corpus still dedups crashes by content.
+        return CrashCoverage_.update(res.bitmap) == R::Known ? Verdict::Boring : Verdict::Objective;
 
     default:
-        // Should be put to boring after 
-        return Verdict::Interesting;
+        return Verdict::Boring;
     }
 }
