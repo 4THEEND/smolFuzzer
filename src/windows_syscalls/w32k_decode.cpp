@@ -263,6 +263,7 @@ decode_event(const uint8_t* p, uint32_t remaining, std::string& err)
     ev.ssn          = h.Ssn;
     ev.phase        = static_cast<Phase>(h.Phase);
     ev.flags        = h.Flags;
+    ev.occurrence   = h.Occurrence;
     ev.name         = SyscallName(h.Ssn);
     ev.fingerprint.exact       = h.Fingerprint.Exact;
     ev.fingerprint.module_path = h.Fingerprint.ModulePath;
@@ -403,6 +404,8 @@ void Print(const EventInfo& ev, std::ostream& out) {
         << std::right
         << " (0x" << std::hex << std::setw(4) << std::setfill('0') << ev.ssn
         << std::dec << std::setfill(' ') << ")";
+    if (ev.has_occurrence())
+        out << " #" << ev.occurrence;
     if (ev.is_post())
         out << " -> 0x" << std::hex << static_cast<uint64_t>(ev.return_value) << std::dec;
     if (ev.flags)
@@ -540,6 +543,7 @@ std::vector<uint8_t> EncodeEvent(const EventInfo& ev)
         h.Fingerprint.Index      = ev.fingerprint.index;
         h.NestedOffset = nested_offset;
         h.NestedCount  = static_cast<uint16_t>(n_nested);
+        h.Occurrence   = ev.occurrence;
         std::memcpy(buf.data(), &h, sizeof(h));
     }
 
@@ -627,6 +631,175 @@ std::vector<uint8_t> EncodeBatch(const std::vector<EventInfo>& events,
                                   uint32_t dropped)
 {
     return encode_batch_impl(events, dropped);
+}
+
+/* -------------------------------------------------------------------- */
+/* Mutation program                                                      */
+/* -------------------------------------------------------------------- */
+
+static_assert(kBatchMagic   == W32K_BATCH_MAGIC, "magic");
+static_assert(kProgramMagic == W32K_MUT_MAGIC,   "magic");
+
+static bool magic_at(const std::vector<uint8_t>& buf, std::size_t off, uint32_t magic) noexcept {
+    if (off > buf.size() || buf.size() - off < 4) return false;
+    uint32_t m;
+    std::memcpy(&m, buf.data() + off, 4);
+    return m == magic;
+}
+
+bool IsBatch(const std::vector<uint8_t>& buf, std::size_t off) noexcept {
+    return magic_at(buf, off, W32K_BATCH_MAGIC);
+}
+
+bool IsProgram(const std::vector<uint8_t>& buf, std::size_t off) noexcept {
+    return magic_at(buf, off, W32K_MUT_MAGIC);
+}
+
+static Fingerprint fp_from_wire(const W32K_FINGERPRINT& w) {
+    Fingerprint f;
+    f.exact       = w.Exact;
+    f.module_path = w.ModulePath;
+    f.creator     = w.Creator;
+    f.anon_frames = w.AnonFrames;
+    f.remote      = w.Remote != 0;
+    f.start_anon  = w.StartAnon != 0;
+    f.index       = w.Index;
+    return f;
+}
+
+static W32K_FINGERPRINT fp_to_wire(const Fingerprint& f) {
+    W32K_FINGERPRINT w{};
+    w.Exact      = f.exact;
+    w.ModulePath = f.module_path;
+    w.Creator    = f.creator;
+    w.AnonFrames = f.anon_frames;
+    w.Remote     = f.remote     ? 1u : 0u;
+    w.StartAnon  = f.start_anon ? 1u : 0u;
+    w.Index      = f.index;
+    return w;
+}
+
+ProgramResult DecodeProgram(const std::vector<uint8_t>& buf) {
+    ProgramResult r;
+    if (buf.size() < sizeof(W32K_MUT_HEADER)) {
+        r.error_msg = "buffer smaller than program header";
+        return r;
+    }
+    W32K_MUT_HEADER h;
+    std::memcpy(&h, buf.data(), sizeof(h));
+    if (h.Magic != W32K_MUT_MAGIC || h.Version != W32K_MUT_VERSION ||
+        h.HeaderSize != sizeof(W32K_MUT_HEADER) || h.RecordSize != sizeof(W32K_MUT_RECORD)) {
+        r.error_msg = "invalid program magic/version/sizes";
+        return r;
+    }
+    const uint64_t need = sizeof(h) + static_cast<uint64_t>(h.RecordCount) * sizeof(W32K_MUT_RECORD);
+    if (h.TotalSize < need || h.TotalSize > buf.size()) {
+        r.error_msg = "program TotalSize out of range";
+        return r;
+    }
+
+    r.program.trace_id = h.TraceId;
+    r.program.seed     = h.Seed;
+    r.program.records.reserve(h.RecordCount);
+    for (uint32_t i = 0; i < h.RecordCount; ++i) {
+        W32K_MUT_RECORD w;
+        std::memcpy(&w, buf.data() + sizeof(h) + i * sizeof(w), sizeof(w));
+        MutRecord m;
+        m.ssn           = w.Ssn;
+        m.occurrence    = w.Occurrence;
+        m.fingerprint   = fp_from_wire(w.Fingerprint);
+        m.op            = static_cast<MutOp>(w.Op);
+        m.flags         = w.Flags;
+        m.arg           = w.Arg;
+        m.width         = w.Width;
+        m.count_arg     = w.CountArg;
+        m.strategy      = w.Strategy;
+        m.parent_offset = w.ParentOffset;
+        m.offset        = w.Offset;
+        m.length        = w.Length;
+        m.source_length = w.SourceLength;
+        m.value         = w.Value;
+        m.expect        = w.Expect;
+        r.program.records.push_back(m);
+    }
+    r.consumed = h.TotalSize;
+    r.ok = true;
+    return r;
+}
+
+std::vector<uint8_t> EncodeProgram(const Program& p) {
+    const auto n = static_cast<uint32_t>(p.records.size());
+    const uint32_t total = static_cast<uint32_t>(sizeof(W32K_MUT_HEADER) + n * sizeof(W32K_MUT_RECORD));
+    std::vector<uint8_t> buf(total, 0u);
+
+    W32K_MUT_HEADER h{};
+    h.Magic       = W32K_MUT_MAGIC;
+    h.Version     = W32K_MUT_VERSION;
+    h.HeaderSize  = sizeof(W32K_MUT_HEADER);
+    h.TotalSize   = total;
+    h.RecordCount = static_cast<uint16_t>(n);
+    h.RecordSize  = sizeof(W32K_MUT_RECORD);
+    h.TraceId     = p.trace_id;
+    h.Seed        = p.seed;
+    std::memcpy(buf.data(), &h, sizeof(h));
+
+    for (uint32_t i = 0; i < n; ++i) {
+        const auto& m = p.records[i];
+        W32K_MUT_RECORD w{};
+        w.Ssn          = m.ssn;
+        w.Op           = static_cast<uint8_t>(m.op);
+        w.Flags        = m.flags;
+        w.Arg          = m.arg;
+        w.Width        = m.width;
+        w.CountArg     = m.count_arg;
+        w.Strategy     = m.strategy;
+        w.Occurrence   = m.occurrence;
+        w.ParentOffset = m.parent_offset;
+        w.Offset       = m.offset;
+        w.Length       = m.length;
+        w.SourceLength = m.source_length;
+        w.Value        = m.value;
+        w.Expect       = m.expect;
+        w.Fingerprint  = fp_to_wire(m.fingerprint);
+        std::memcpy(buf.data() + sizeof(h) + i * sizeof(w), &w, sizeof(w));
+    }
+    return buf;
+}
+
+std::string Describe(const MutRecord& r) {
+    std::ostringstream o;
+    o << SyscallName(r.ssn);
+    if (r.every_call()) o << "#*";
+    else                o << '#' << r.occurrence;
+    o << " a" << static_cast<unsigned>(r.arg) << std::hex;
+    switch (r.op) {
+    case MutOp::SetArg:
+        o << " set" << std::dec << static_cast<unsigned>(r.width) << std::hex << " = 0x" << r.value;
+        break;
+    case MutOp::Write:
+        if (r.nested()) o << " ->[+0x" << r.parent_offset << ']';
+        o << " +0x" << r.offset << " write" << std::dec << static_cast<unsigned>(r.width)
+          << std::hex << " = 0x" << r.value;
+        break;
+    case MutOp::Resize:
+        o << " resize 0x" << r.source_length << " -> 0x" << r.length << " bytes";
+        if (r.count_arg >= 0)
+            o << ", a" << std::dec << static_cast<int>(r.count_arg) << std::hex << " = 0x" << r.value;
+        break;
+    default:
+        o << " op?" << static_cast<unsigned>(r.op);
+        break;
+    }
+    if (r.guarded()) o << " if ==0x" << r.expect;
+    o << std::dec << " [fp " << std::hex << r.fingerprint.exact << std::dec << '/' << r.fingerprint.index << ']';
+    return o.str();
+}
+
+void Print(const Program& p, std::ostream& out) {
+    out << "[program] trace=0x" << std::hex << p.trace_id << " seed=0x" << p.seed << std::dec
+        << ", " << p.records.size() << " record(s)\n";
+    for (const auto& r : p.records)
+        out << "  " << Describe(r) << '\n';
 }
 
 } // namespace W32k

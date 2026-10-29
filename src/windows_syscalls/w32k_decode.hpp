@@ -177,6 +177,8 @@ struct EventInfo {
     uint16_t    ssn          = 0;
     Phase       phase        = Phase::Pre;
     uint32_t    flags        = 0;   // W32K_EVENT_FLAG_* bitmask
+    uint16_t    occurrence   = 0;   // nth PRE call of ssn by this thread identity
+                                    // (0xFFFF = saturated/unknown)
     std::string name;               // "NtDeviceIoControlFile", "<nt:0x0055>", etc.
     Fingerprint fingerprint;        // thread fingerprint at capture time
 
@@ -187,6 +189,9 @@ struct EventInfo {
     bool is_post()   const noexcept { return phase == Phase::Post; }
     bool is_nt()     const noexcept { return ssn <  0x1000u; }
     bool is_win32k() const noexcept { return ssn >= 0x1000u; }
+    bool has_occurrence() const noexcept { return occurrence != kNoOccurrence; }
+
+    static constexpr uint16_t kNoOccurrence = 0xFFFFu;
 };
 
 /* -------------------------------------------------------------------- */
@@ -253,5 +258,73 @@ std::vector<uint8_t> EncodeEvent(const EventInfo& event);
 std::vector<uint8_t> EncodeBatch(const BatchResult&          batch);
 std::vector<uint8_t> EncodeBatch(const std::vector<EventInfo>& events,
                                   uint32_t                    dropped = 0);
+
+/* -------------------------------------------------------------------- */
+/* Mutation program (host -> driver)                                    */
+/*                                                                       */
+/* What the fuzzer stores and sends instead of a whole batch.  The       */
+/* driver applies each record to the live call it designates            */
+/* (see w32k_wire_km.h / w32k_mutate.h for the runtime semantics).       */
+/* -------------------------------------------------------------------- */
+
+enum class MutOp : uint8_t { SetArg = 0, Write = 1, Resize = 2 };
+
+namespace MutFlag {
+    constexpr uint8_t Nested    = 0x01;   // WRITE: dereference parent_offset first
+    constexpr uint8_t EveryCall = 0x02;   // ignore occurrence
+    constexpr uint8_t Guard     = 0x04;   // only if current value == expect
+}
+
+struct MutRecord {
+    // ---- which call ----
+    uint16_t    ssn           = 0;
+    uint32_t    occurrence    = 0;
+    Fingerprint fingerprint;
+    // ---- what to do ----
+    MutOp       op            = MutOp::SetArg;
+    uint8_t     flags         = 0;
+    uint8_t     arg           = 0;
+    uint8_t     width         = 8;
+    int8_t      count_arg     = -1;   // Resize
+    uint8_t     strategy      = 0;    // host bookkeeping (mutator's Strategy)
+    uint32_t    parent_offset = 0;    // Write + Nested
+    uint32_t    offset        = 0;    // Write
+    uint32_t    length        = 0;    // Resize: new size in bytes
+    uint32_t    source_length = 0;    // Resize: live bytes replicated
+    uint64_t    value         = 0;
+    uint64_t    expect        = 0;    // Guard
+
+    bool nested()     const noexcept { return flags & MutFlag::Nested; }
+    bool every_call() const noexcept { return flags & MutFlag::EveryCall; }
+    bool guarded()    const noexcept { return flags & MutFlag::Guard; }
+};
+
+struct Program {
+    uint64_t               trace_id = 0;  // reference trace (host-side store key)
+    uint64_t               seed     = 0;  // seed of the last mutation pass
+    std::vector<MutRecord> records;
+};
+
+struct ProgramResult {
+    bool        ok = false;
+    std::string error_msg;
+    Program     program;
+    uint32_t    consumed = 0;   // bytes used by the program; a trace may follow
+};
+
+constexpr uint32_t kBatchMagic   = 0x42323357u;   // 'W32B'
+constexpr uint32_t kProgramMagic = 0x4D323357u;   // 'W32M'
+
+// Magic sniffing (needs at least 4 bytes at `off`).
+bool IsBatch  (const std::vector<uint8_t>& buf, std::size_t off = 0) noexcept;
+bool IsProgram(const std::vector<uint8_t>& buf, std::size_t off = 0) noexcept;
+
+ProgramResult        DecodeProgram(const std::vector<uint8_t>& buf);
+std::vector<uint8_t> EncodeProgram(const Program& program);
+
+// One line per record, e.g.
+//   NtGdiCreateBitmap#3 a4 +0x10 write4 = 0xffffffff [every]
+std::string Describe(const MutRecord& r);
+void        Print(const Program& program, std::ostream& out);
 
 } // namespace W32k

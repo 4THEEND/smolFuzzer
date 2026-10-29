@@ -25,3 +25,7 @@ Exemples are available in `mutator.cpp` but the idea is as following
 class MyMutator_t : public Mutator_t { ... };
 REGISTER_MUTATOR(MyMutator_t, "mine", "my custom strategy");
 ```
+
+## Creating snapshot
+
+Look [here](https://github.com/nyx-fuzz/Nyx/blob/main/docs/01-Nyx-VMs.md) to see how to create snapshots.

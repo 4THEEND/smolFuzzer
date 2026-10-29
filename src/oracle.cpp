@@ -92,6 +92,7 @@ Verdict CoverageOracle_t::evaluate(const ExecResult_t &res)
         return CrashCoverage_.update(res.bitmap) == R::Known ? Verdict::Boring : Verdict::Objective;
 
     default:
+        // Change after we have coverage
         return Verdict::Boring;
     }
 }

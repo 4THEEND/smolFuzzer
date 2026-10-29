@@ -70,7 +70,7 @@ C_ASSERT(sizeof(W32K_FINGERPRINT) == 40);
 /* -------------------------------------------------------------------- */
 
 #define W32K_EVENT_MAGIC   0x4B323357u
-#define W32K_EVENT_VERSION 3u
+#define W32K_EVENT_VERSION 4u
 
 #define W32K_PHASE_PRE     0u
 #define W32K_PHASE_POST    1u
@@ -116,7 +116,7 @@ typedef struct W32K_EVENT_HEADER {
     uint32_t ArgsOffset;
     uint32_t NestedOffset;
     uint16_t NestedCount;
-    uint16_t Reserved;
+    uint16_t Occurrence;
     W32K_FINGERPRINT Fingerprint;
 } W32K_EVENT_HEADER;
 
@@ -160,6 +160,52 @@ C_ASSERT(sizeof(W32K_EVENT_HEADER)          == 112);
 C_ASSERT(sizeof(W32K_EVENT_ARG)             == 32);
 C_ASSERT(sizeof(W32K_EVENT_NESTED)          == 40);
 C_ASSERT(sizeof(W32K_WIRE_UNICODE_STRING)   == 16);
+
+#define W32K_MUT_MAGIC     0x4D323357u
+#define W32K_MUT_VERSION   1u
+
+#define W32K_MUT_OP_SET_ARG 0u
+#define W32K_MUT_OP_WRITE   1u
+#define W32K_MUT_OP_RESIZE  2u
+
+#define W32K_MUTF_NESTED     0x01u
+#define W32K_MUTF_EVERY_CALL 0x02u
+#define W32K_MUTF_GUARD      0x04u
+
+#pragma pack(push, 8)
+typedef struct W32K_MUT_HEADER {
+    uint32_t Magic;
+    uint16_t Version;
+    uint16_t HeaderSize;
+    uint32_t TotalSize;
+    uint16_t RecordCount;
+    uint16_t RecordSize;
+    uint64_t TraceId;
+    uint64_t Seed;
+} W32K_MUT_HEADER;
+
+typedef struct W32K_MUT_RECORD {
+    uint16_t Ssn;
+    uint8_t  Op;
+    uint8_t  Flags;
+    uint8_t  Arg;
+    uint8_t  Width;
+    int8_t   CountArg;
+    uint8_t  Strategy;
+    uint32_t Occurrence;
+    uint32_t ParentOffset;
+    uint32_t Offset;
+    uint32_t Length;
+    uint32_t SourceLength;
+    uint32_t Reserved;
+    uint64_t Value;
+    uint64_t Expect;
+    W32K_FINGERPRINT Fingerprint;
+} W32K_MUT_RECORD;
+#pragma pack(pop)
+
+C_ASSERT(sizeof(W32K_MUT_HEADER) == 32);
+C_ASSERT(sizeof(W32K_MUT_RECORD) == 88);
 #endif /* !W32K_WIRE_KM_H */
 
 
