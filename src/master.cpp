@@ -4,18 +4,13 @@
 #include <future>
 #include <thread>
 
-#include <unistd.h>
-
 
 Master_t::Master_t(const FuzzerConfig_t& conf)
     : Config_(conf),
       // The oracle is chosen here; swap in any Oracle_t subclass.
       Corpus_(std::make_shared<Corpus_t>(std::make_unique<CoverageOracle_t>(), maxInputSize(conf))),
       Agents_() {
-    nyx_config_set_workdir_path(Config_.nyxConf, Config_.workdir.c_str());
-    nyx_config_set_input_buffer_size(Config_.nyxConf, Config_.kAgentPayloadBytes);
-    nyx_config_set_input_buffer_write_protection(Config_.nyxConf, true);
-    if (Config_.verbose) nyx_config_set_hprintf_fd(Config_.nyxConf, STDERR_FILENO);
+    configureNyx(Config_);
 }
 
 

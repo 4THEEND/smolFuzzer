@@ -71,9 +71,13 @@ add_executable(nyxfuzz
     corpus.cpp
     mutator.cpp
     oracle.cpp
+    executor.cpp
+    format.cpp
+    tools.cpp
 
-    windows_syscalls/syscall_mutator.cpp
-    windows_syscalls/w32k_decode.cpp
+    win32k_syscalls/syscall_mutator.cpp
+    win32k_syscalls/syscall_format.cpp
+    win32k_syscalls/sysmon_decode.cpp
 )
 target_link_libraries(nyxfuzz PRIVATE fmt::fmt argparse::argparse libnyx)
 target_compile_options(nyxfuzz PRIVATE -Wall -Wextra)

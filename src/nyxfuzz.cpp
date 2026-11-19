@@ -8,6 +8,7 @@
 #include "nyx.hpp"
 #include "master.hpp"
 #include "mutator.hpp"
+#include "tools.hpp"
 #include "utils.hpp"
 
 constexpr std::size_t kAgentPayloadBytes = 64 * 1024; // PAYLOAD_SIZE * 1024 in the driver
@@ -59,6 +60,39 @@ int main(int argc, char **argv)
         .implicit_value(true)
         .help("forward guest hprintf output to stderr");
 
+    // Offline tools: one VM, no fuzzing. They use -s, -w, -t and -v like a fuzzing run.
+    program.add_argument("-r", "--repro")
+        .default_value(std::string{})
+        .metavar("PATH")
+        .help("replay a testcase (or every testcase of a directory, e.g. <workdir>/crashes) and report how it ends");
+
+    program.add_argument("-M", "--minimize")
+        .default_value(std::string{})
+        .metavar("FILE")
+        .help("reduce a crashing testcase to a smaller one that ends the same way");
+
+    program.add_argument("-o", "--output")
+        .default_value(std::string{})
+        .metavar("FILE")
+        .help("--minimize: where to write the result (default: FILE.min)");
+
+    program.add_argument("--tries")
+        .default_value(1UL)
+        .scan<'u', unsigned long>()
+        .metavar("N")
+        .help("--repro: executions per testcase; --minimize: executions before a candidate is given up on (for flaky bugs)");
+
+    program.add_argument("--match-aux")
+        .default_value(false)
+        .implicit_value(true)
+        .help("--minimize: a candidate must also end with the same aux string, not just the same exit kind");
+
+    program.add_argument("--max-execs")
+        .default_value(0UL)
+        .scan<'u', unsigned long>()
+        .metavar("N")
+        .help("--minimize: stop after N executions and keep the best so far (0 = no limit)");
+
     try
     {
         program.parse_args(argc, argv);
@@ -102,6 +136,25 @@ int main(int argc, char **argv)
     // Ability to stop on a Ctrl-C
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+
+    const auto reproPath = program.get<std::string>("--repro");
+    const auto minimizePath = program.get<std::string>("--minimize");
+    if (!reproPath.empty() && !minimizePath.empty())
+    {
+        std::cerr << "--repro and --minimize cannot be combined\n";
+        return 1;
+    }
+    if (!reproPath.empty() || !minimizePath.empty())
+    {
+        const ToolOptions_t opt{
+            .input = reproPath.empty() ? minimizePath : reproPath,
+            .output = program.get<std::string>("--output"),
+            .tries = program.get<unsigned long>("--tries"),
+            .matchAux = program.get<bool>("--match-aux"),
+            .maxExecs = program.get<unsigned long>("--max-execs"),
+        };
+        return reproPath.empty() ? runMinimize(config, opt) : runRepro(config, opt);
+    }
 
     Master_t masterFuzzer(config);
     masterFuzzer.run();
