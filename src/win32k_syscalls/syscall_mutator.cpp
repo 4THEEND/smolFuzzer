@@ -13,8 +13,12 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "../mutator.hpp"
 #include "syscall_program.hpp"
@@ -30,7 +34,7 @@ namespace
     using prog::Reloc;
     using prog::Value;
 
-    constexpr std::size_t kTargetCalls = 16;
+    constexpr std::size_t kTargetCalls = 32;
 
     static sysmon::ArgPool g_ArgPool; 
     std::atomic<const sysmon::ArgPool *> g_pool{nullptr};
@@ -42,8 +46,7 @@ namespace
     {
         const SyscallDesc *end = kSyscalls + kNumSyscalls;
         const SyscallDesc *it = std::lower_bound(kSyscalls, end, ssn,
-                                                 [](const SyscallDesc &s, uint16_t v)
-                                                 { return s.ssn < v; });
+                                                 [](const SyscallDesc &s, uint16_t v) { return s.ssn < v; });
         return it != end && it->ssn == ssn ? it : nullptr;
     }
 
@@ -51,7 +54,6 @@ namespace
 
     struct TableIndex_t
     {
-        std::vector<const SyscallDesc *> enabled;
         std::vector<const SyscallDesc *> producers;                             // enabled syscalls returning a handle
         std::map<std::string_view, std::vector<const SyscallDesc *>> consumers; // argument type -> syscalls taking it
 
@@ -61,7 +63,6 @@ namespace
             {
                 if (!sc.enabled)
                     continue;
-                enabled.push_back(&sc);
                 if (sc.ret == Ret::Handle)
                     producers.push_back(&sc);
                 for (std::size_t i = 0; i < sc.numArgs; ++i)
@@ -94,12 +95,90 @@ namespace
     // ------------------------------------------------------------ primitives
 
     // State of one mutate() call.
+    // How much of the budget each syscall gets when a new call is chosen.
+    //
+    // Executions are expensive, so calls that cannot teach much get less of them:
+    //   - no arguments: nothing to vary, running it a few times says it all;
+    //   - only plain numbers: little for the kernel to parse or get wrong;
+    //   - pointers, and even more so structs the kernel is known to read fields
+    //     of or follow pointers in: the most validation code per call.
+    // The caller's focus (setSyscallFocus) multiplies the result.
+    struct Weights_t
+    {
+        std::vector<double> weight;     // per entry of kSyscalls; 0 = never chosen
+        std::vector<double> cumulative; // running sum of `weight`
+        double maxWeight = 0;
+        std::size_t usable = 0;         // entries with a non-zero weight
+
+        explicit Weights_t(const std::vector<std::pair<std::string, double>> &focus)
+        {
+            for (const SyscallDesc &sc : kSyscalls)
+            {
+                double w = 1.0;
+                bool anyPointer = false, anyStruct = false;
+                for (std::size_t i = 0; i < sc.numArgs; ++i)
+                {
+                    const ArgDesc &d = kArgs[sc.firstArg + i];
+                    anyPointer |= d.kind == Kind::Pointer || d.kind == Kind::Buffer || d.kind == Kind::Array || d.kind == Kind::String;
+                    anyStruct |= d.numFields != 0 || d.numNested != 0;
+                }
+                if (sc.numArgs == 0)
+                    w = 0.05;
+                else if (anyStruct)
+                    w = 3.0;
+                else if (anyPointer)
+                    w = 2.0;
+                else
+                {
+                    bool anyHandle = false;
+                    for (std::size_t i = 0; i < sc.numArgs; ++i)
+                        anyHandle |= kArgs[sc.firstArg + i].kind == Kind::Handle;
+                    w = anyHandle ? 1.0 : 0.5;
+                }
+
+                // The longest matching name prefix decides the focus multiplier.
+                std::size_t best = 0;
+                double multiplier = 1.0;
+                bool matched = false;
+                for (const auto &[prefix, m] : focus)
+                {
+                    if (sc.name.substr(0, prefix.size()) == prefix && (!matched || prefix.size() > best))
+                    {
+                        best = prefix.size();
+                        multiplier = m;
+                        matched = true;
+                    }
+                }
+                w = sc.enabled && multiplier > 0 ? w * multiplier : 0.0;
+
+                weight.push_back(w);
+                cumulative.push_back((cumulative.empty() ? 0.0 : cumulative.back()) + w);
+                maxWeight = std::max(maxWeight, w);
+                usable += w > 0;
+            }
+        }
+    };
+
+    std::mutex g_weightsLock;
+    std::shared_ptr<const Weights_t> g_weights; // null until first use or setSyscallFocus()
+
+    std::shared_ptr<const Weights_t> currentWeights()
+    {
+        std::lock_guard<std::mutex> lock(g_weightsLock);
+        if (!g_weights)
+            g_weights = std::make_shared<const Weights_t>(std::vector<std::pair<std::string, double>>{});
+        return g_weights;
+    }
+
     struct Gen_t
     {
         Rng_t &rng;
-        const sysmon::ArgPool *pool;    // may be null
-        std::optional<uint64_t> thread; // the program's thread: prefer pool arguments it passed
+        const sysmon::ArgPool *pool;       // may be null
+        std::optional<uint64_t> thread;    // the program's thread: prefer pool arguments it passed
+        const Weights_t *weights;          // never null
     };
+
+    double unitRandom(Rng_t &rng) { return static_cast<double>(rng() >> 11) * 0x1.0p-53; } // [0, 1)
 
     uint64_t mask(uint64_t v, std::size_t width) { return width >= 8 ? v : v & ((1ull << (width * 8)) - 1); }
 
@@ -172,8 +251,7 @@ namespace
         if (elem == 0)
             elem = 1;
         std::vector<uint8_t> out;
-        const auto put = [&](uint64_t ch)
-        {
+        const auto put = [&](uint64_t ch) {
             for (std::size_t k = 0; k < elem; ++k)
                 out.push_back(static_cast<uint8_t>(ch >> (8 * k)));
         };
@@ -478,18 +556,28 @@ namespace
     const SyscallDesc &pickSyscall(Gen_t &g, const Program &p, std::size_t pos)
     {
         const TableIndex_t &index = tableIndex();
-        const auto consumerOf = [&](std::string_view type) -> const SyscallDesc *
-        {
+        const Weights_t &w = *g.weights;
+        // A member of `list`, each in proportion to its weight; null if none is found quickly.
+        const auto fromList = [&](const std::vector<const SyscallDesc *> &list) -> const SyscallDesc * {
+            for (int tries = 0; tries < 8 && !list.empty(); ++tries)
+            {
+                const SyscallDesc *sc = list[randBelow(g.rng, list.size())];
+                if (unitRandom(g.rng) * w.maxWeight < w.weight[static_cast<std::size_t>(sc - kSyscalls)])
+                    return sc;
+            }
+            return nullptr;
+        };
+        const auto consumerOf = [&](std::string_view type) -> const SyscallDesc * {
             const auto it = index.consumers.find(type);
-            return it == index.consumers.end() ? nullptr : it->second[randBelow(g.rng, it->second.size())];
+            return it == index.consumers.end() ? nullptr : fromList(it->second);
         };
 
         const std::size_t roll = randBelow(g.rng, 100);
         if (roll < 10)
         {
             // Something that creates a handle for later calls to use.
-            if (!index.producers.empty())
-                return *index.producers[randBelow(g.rng, index.producers.size())];
+            if (const SyscallDesc *sc = fromList(index.producers))
+                return *sc;
         }
         else if (roll < 40)
         {
@@ -510,7 +598,12 @@ namespace
                     return *sc;
             }
         }
-        return *index.enabled[randBelow(g.rng, index.enabled.size())];
+        // Any syscall, in proportion to its weight.
+        const double r = unitRandom(g.rng) * w.cumulative.back();
+        std::size_t i = static_cast<std::size_t>(std::upper_bound(w.cumulative.begin(), w.cumulative.end(), r) - w.cumulative.begin());
+        while (i >= kNumSyscalls || w.weight[i] <= 0) // rounding at the very end of the range
+            i = i == 0 ? kNumSyscalls - 1 : i - 1;
+        return kSyscalls[i];
     }
 
     // -------------------------------------------------------- program editing
@@ -534,10 +627,10 @@ namespace
     void shiftRefs(Program &p, std::size_t pos, std::size_t count)
     {
         for (std::size_t c = pos; c < p.calls.size(); ++c)
-            forEachValue(p.calls[c], [&](Value &v)
-                         {
+            forEachValue(p.calls[c], [&](Value &v) {
                 if (v.tag == Value::Tag::Result && v.value >= pos)
-                    v.value += count; });
+                    v.value += count;
+            });
     }
 
     void insertCallAt(Program &p, std::size_t pos, Call call)
@@ -550,14 +643,14 @@ namespace
     {
         p.calls.erase(p.calls.begin() + static_cast<std::ptrdiff_t>(k));
         for (std::size_t c = k; c < p.calls.size(); ++c)
-            forEachValue(p.calls[c], [&](Value &v)
-                         {
+            forEachValue(p.calls[c], [&](Value &v) {
                 if (v.tag != Value::Tag::Result)
                     return;
                 if (v.value == k)
                     v = prog::Imm(0); // its result is gone
                 else if (v.value > k)
-                    --v.value; });
+                    --v.value;
+            });
     }
 
     // Make a parsed program safe to edit and to run: only enabled syscalls of
@@ -577,10 +670,10 @@ namespace
                 args.resize(sc->numArgs);
             while (args.size() < sc->numArgs)
                 args.push_back(genArg(g, p, i, argOf(*sc, args.size())));
-            forEachValue(p.calls[i], [&](Value &v)
-                         {
+            forEachValue(p.calls[i], [&](Value &v) {
                 if (v.tag == Value::Tag::Result && v.value >= i)
-                    v = prog::Imm(0); });
+                    v = prog::Imm(0);
+            });
             ++i;
         }
     }
@@ -630,15 +723,14 @@ namespace
         for (std::size_t i = 0; i < count; ++i)
         {
             Call c = std::move(q.calls[first + i]);
-            forEachValue(c, [&](Value &v)
-                         {
-                             if (v.tag != Value::Tag::Result)
-                                 return;
-                             if (v.value >= first)
-                                 v.value = v.value - first + pos; // producer travels along
-                             else
-                                 v = prog::Imm(0); // producer left behind
-                         });
+            forEachValue(c, [&](Value &v) {
+                if (v.tag != Value::Tag::Result)
+                    return;
+                if (v.value >= first)
+                    v.value = v.value - first + pos; // producer travels along
+                else
+                    v = prog::Imm(0); // producer left behind
+            });
             p.calls.insert(p.calls.begin() + static_cast<std::ptrdiff_t>(pos + i), std::move(c));
         }
         return true;
@@ -726,8 +818,7 @@ namespace
         if (!m.data.empty())
             m.data.resize(n, static_cast<uint8_t>(g.rng()));
         m.size = static_cast<uint16_t>(n);
-        std::erase_if(m.relocs, [&](const Reloc &r)
-                      { return static_cast<std::size_t>(r.offset) + 8 > n; });
+        std::erase_if(m.relocs, [&](const Reloc &r) { return static_cast<std::size_t>(r.offset) + 8 > n; });
     }
 
     void tweakMem(Gen_t &g, const ArgDesc *d, Value &m)
@@ -876,8 +967,7 @@ namespace
         {
             // A single oversized call: keep its shape, drop the buffer contents.
             for (Call &c : p.calls)
-                forEachValue(c, [](Value &v)
-                             { v.data.clear(); });
+                forEachValue(c, [](Value &v) { v.data.clear(); });
             prog::Serialize(p, out);
         }
         if (out.size() > maxSize)
@@ -962,9 +1052,6 @@ namespace
             Program p;
             prog::Parse(d.data(), d.size(), p); // on damage, keeps the calls before it
 
-            // A program runs on one guest thread. It gets that thread from the first
-            // pooled argument it uses, and from then on prefers arguments the same
-            // thread passed, so handles are used by the thread that owns them.
             if(!g_pool.load())
                 loadArgPool();
 
@@ -973,7 +1060,11 @@ namespace
                 return;
             }
 
-            Gen_t g{ctx.rng, g_pool.load(), std::nullopt};
+            // A program runs on one guest thread. It gets that thread from the first
+            // pooled argument it uses, and from then on prefers arguments the same
+            // thread passed, so handles are used by the thread that owns them.
+            const std::shared_ptr<const Weights_t> weights = currentWeights();
+            Gen_t g{ctx.rng, g_pool.load(), std::nullopt, weights.get()};
             if (p.thread != 0)
                 g.thread = p.thread;
             sanitize(g, p);
@@ -1014,6 +1105,18 @@ void setSyscallArgPool(const sysmon::ArgPool *pool, std::shared_mutex *guard)
 {
     g_poolGuard.store(guard);
     g_pool.store(pool);
+}
+
+std::size_t setSyscallFocus(const std::vector<std::pair<std::string, double>> &prefixes)
+{
+    auto weights = std::make_shared<const Weights_t>(prefixes);
+    const std::size_t usable = weights->usable;
+    if (usable != 0) // a focus that excludes everything is ignored
+    {
+        std::lock_guard<std::mutex> lock(g_weightsLock);
+        g_weights = std::move(weights);
+    }
+    return usable;
 }
 
 REGISTER_MUTATOR(SyscallMutator_t, "syscall", "win32k syscall programs with arguments from the sysmon pool");
